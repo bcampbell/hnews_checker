@@ -1,0 +1,6 @@
+hnews_checker
+
+Online sanity checker for pages with embedded hNews data.
+Not really a validator, more a set of sanity-checks, covering mistakes
+seen in examples in the wild.
+
