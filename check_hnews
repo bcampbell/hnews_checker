@@ -1,0 +1,207 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+
+""" util to check microformat data (not quite validation ;-) """
+
+import lxml.etree, lxml.html
+from optparse import OptionParser
+import os
+import pprint
+import sys
+import urllib2
+import cgi
+import datetime
+
+from microtron import *
+
+
+
+page_header = """<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"
+       "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">   
+<html>
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+    <link src="style.css">
+    <link rel="stylesheet" href="i/style.css"/>
+    <link rel="icon" href="i/favicon.png"/>
+</head>
+<body>
+<h1>hNews micro<b>format</b> sanity-checker<small>(_not_ a validator!)</small></h1>
+"""
+
+
+
+page_footer = """
+<h2>Credits</h2>
+<p>Written by Ben Campbell (<a href="http://mediastandardstrust.org">Media Standards Trust</a>)</p>
+<p>Uses a <a href="http://github.com/bcampbell/microtron">modified</a> version of the <a href="http://github.com/amccollum/microtron">Microtron</a> microformat parser</p>
+<p>Page style based on <a href="http://hcard.geekhood.net/">hCard Validator</a> by Kornel Lesiński
+(<a href="http://code.google.com/p/hcardvalidator/">Source</a>)</p>
+<p>Icons are from <a href="http://tango.freedesktop.org/">Tango Icon Library</a>.</p>
+
+</body>
+</html>
+"""
+
+
+
+form = """
+<form action="" method="GET">
+<p>Enter the url of the hNews article you'd like to check</p>
+<div><label for="url">URL</label> <input id="url" name="url" value="{url}" size="100"/></div>
+<p><input type="submit" value="Check URL"/></p>
+</form>
+"""
+
+
+
+def main(argv = None):
+    if argv is None:
+        argv = sys.argv
+
+    parser = OptionParser('usage: %prog <url>')
+#    parser.add_option("-h", "--output-html",
+#                  action="store_true", dest="output_html", default=False,
+#                  help="format the results as html")
+
+    options, arguments = parser.parse_args(argv[1:])
+    url = ''
+    if len(arguments) >= 1:
+        url = arguments[0]
+    print page_header
+
+    print form.replace( '{url}', url )
+
+    if url != '':
+        try:
+            html = urllib2.urlopen( url ).read()
+            tree = lxml.html.document_fromstring( html )
+
+            parser = Parser( tree, strict=True, collect_errors=True )
+            data = parser.parse_format( 'hnews' )
+
+            # turn any microtron errors into messages
+            messages = []
+            for err in parser.errors:
+               messages.append( {
+                    'line': err.sourceline,
+                    'msg': "%s" % (err,),
+                    'kind': 'error' } )
+
+            messages = messages + do_sanity_checks( html, data )
+
+            output_as_html( html, data, messages )
+        except Exception,e:
+            print "<p>ERROR: %s</p>" % (e)
+
+
+        # TODO: extra checks for hnews:
+        # - warn if dates insane (future, or distant past)
+        # - updated but no published
+        # - concatenated authors in single vcard ("Bob Smith and Fred Bloggs")
+        # - insanity in content (eg adverts, scripts....)
+
+    print page_footer
+
+def do_sanity_checks( html, data ):
+    """ assorted extra checks that aren't really part of the parsing stage... """
+
+    messages = []
+
+#    messages.append( {'line':42, 'kind':'warn', 'msg': "A test warning." } )
+
+    if len(data) == 0:
+        messages.append( {'line':1, 'kind':'error', 'msg': "No hNews data found." } )
+
+    for hnews in data:
+        # missing dates? microtron should handle this one...
+        if ('published' not in hnews) and ('updated' not in hnews):
+            messages.append( {'line':1,
+                'kind':'error',
+                'msg': "hNews item has neither 'updated' nor 'published'",
+                'extra': """See the <a href="http://microformats.org/wiki/hatom#Entry_Updated">hAtom spec</a> for more information""" } )
+
+        # sanity-check dates
+        for f in ('published','updated'):
+            if f in hnews:
+                dt = hnews[f]['datetime']
+                if dt.tzinfo is None:
+                    messages.append( {'line':None,
+                        'kind':'warn',
+                        'msg': "'%s' has no timezone" %(f,) } )
+
+                if dt.replace( tzinfo=None ) > datetime.datetime.utcnow() + datetime.timedelta( days=2 ):
+                    messages.append( {'line':1,
+                        'kind':'warn',
+                        'msg': "'%s' date is in the future" %(f,) } )
+#        if 'author' in hnews:
+#            for a in hnews['author']:
+#                if( " and " in a['fn'] ):
+#                    messages.append( {'line':1,
+#                        'kind':'warn',
+#                        'msg': "'%s' date is in the future" %(f,) } )
+                  
+
+
+    return messages
+
+
+
+
+def output_as_html( source_html, data, messages ):
+    messages.sort(lambda x, y: cmp(x['line'],y['line']))
+
+    err_lines = [ m['line'] for m in messages if m['kind']=='error' ]
+    warn_lines = [ m['line'] for m in messages if m['kind']=='warn' ]
+
+    icons = {
+        'error': '<img src="i/error.png" alt="error"/>',
+        'warn': '<img src="i/warn.png" alt="warning"/>',
+        'info': '<img src="i/info.png" alt="info"/>',
+        }
+
+
+    print """<div id="result">"""
+    print """<h2>Results</h2>"""
+    if len( err_lines )==0 and len( warn_lines )==0:
+        print """<p class="valid">Hooray - No errors found!</p>"""
+    else:
+        print '<p class="invalid">%d Errors, %d Warnings</p>' % (len(err_lines), len(warn_lines) )
+
+    print """<ol>"""
+    for msg in messages:
+        print '<li class="%s">' % ( msg['kind'], )
+        print '  <h4>%s %s</h4>' % ( icons[msg['kind']], msg['msg'] )
+        if msg['line'] is not None:
+            print '  <p><a href="#line%d">line %s</a></p>' % ( msg['line'], msg['line'])
+        if 'extra' in msg:
+            print '  <p>%s</p>' % ( msg['extra'],)
+        print '</li>'
+
+    print """</ol>\n"""
+    print """</div>"""
+
+
+    print """<h3>Page Source</h3>"""
+    print """<div id="source">"""
+    n = 1
+    for line in source_html.splitlines():
+        cls = ''
+        if n in warn_lines:
+            cls = ' class="warn"'
+        if n in err_lines:
+            cls = ' class="error"'
+        print '<span%s id="line%d">%d: <code>%s</code></span><br/>' % ( cls,n,n, cgi.escape( line ) )
+        n=n+1
+    print """</div>"""
+
+
+    print """<div><code>"""
+    print data
+    print """</code></div>"""
+
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
