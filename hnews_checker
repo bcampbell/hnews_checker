@@ -1,0 +1,188 @@
+#! /usr/bin/env python
+# -*- coding: utf-8 -*-
+
+""" hnews_checker - a tool to check hnews microformat data (not quite validation ;-)
+
+Can be used as a command-line tool, or as the backend for something else.
+Two ways to use it as a backend:
+1) Run it as an executable using the -j flag, piping json out to the front
+   end. See web/ for a php example of this.
+2) with a python front end (eg a django app), hnews_checker could be
+   used as a module. I guess it'd need a ".py" extension, right?
+"""
+
+import lxml.etree, lxml.html
+from optparse import OptionParser
+import os
+#import pprint
+import sys
+import urllib2
+import cgi
+import datetime
+try:
+    import simplejson as json
+except ImportError:
+    import json
+
+# note, for now you need a custom version of microtron:
+# http://github.com/bcampbell/microtron
+# it has a few hnews fixes and an option to collect up errors
+# instead of bailing upon encountering the first one.
+import microtron
+
+
+def main(argv = None):
+    if argv is None:
+        argv = sys.argv
+
+    parser = OptionParser('usage: %prog <url>')
+    parser.add_option("-j", "--json",
+                  action="store_true", dest="output_json", default=False,
+                  help="format the results as json")
+    parser.add_option("-f", "--full-output",
+                  action="store_true", dest="full_output", default=False,
+                  help="include the html in the output")
+
+    options, arguments = parser.parse_args(argv[1:])
+    url = None
+    if len(arguments) >= 1:
+        url = arguments[0]
+
+    if url is None:
+        parser.error( "no url supplied" )
+
+    try:
+        (messages, html, data) = check( url )
+
+        if options.output_json:
+            # output in json
+            out = { 'messages':messages, 'hnews':data }
+            if options.full_output:
+                out['html'] = html
+
+            dthandler = lambda obj: obj.isoformat() if isinstance(obj, datetime.datetime) else obj
+            print json.dumps( out, default=dthandler ) 
+
+        else:
+            # output as simple readble text
+            # don't bother outputting the parsed hnews data though.
+            if options.full_output:
+                print html
+                print 78*'-'
+            for msg in messages:
+                print "%s:%d %s" %(msg['kind'].upper(), msg['line'], msg['msg'] )
+                if 'extra' in msg:
+                    print "  ", extra['msg']
+
+    except Exception,e:
+        print >>sys.stderr, "ERROR: %s" % (e)
+        sys.exit(1)
+
+    sys.exit(0)
+
+
+def check( url ):
+    """ check and parse any hnews at url """
+    html = urllib2.urlopen( url ).read()
+    tree = lxml.html.document_fromstring( html )
+
+    # push it through microtron
+    parser = microtron.Parser( tree, strict=True, collect_errors=True )
+    data = parser.parse_format( 'hnews' )
+
+    # turn any microtron errors into messages
+    messages = []
+    for err in parser.errors:
+       messages.append( {
+            'line': err.sourceline,
+            'msg': "%s" % (err,),
+            'kind': 'error' } )
+        # TODO: we should be able to better identify specific errors
+        # and add helpful information on what might be wrong, how to
+        # fix it and where to go for more information.
+        # See do_sanity_checks() - we plonk the help info in the message
+        # 'extra' field.
+        # This would involve indentifying the errors microtron produces,
+        # either by looking at the error string here, or by microtron
+        # raising different types of exceptions to better pin it down.
+
+    # now check for other (non-parsing) errors
+    messages = messages + do_sanity_checks( html, tree, data )
+
+    # sort messages by linenum
+    messages.sort(lambda x, y: cmp(x['line'],y['line']))
+
+
+    return (messages,html,data)
+
+
+def do_sanity_checks( html, tree, data ):
+    """ assorted extra checks that aren't really part of the parsing stage... """
+
+    # params:
+    # html - the raw html
+    # tree - the lxml.html tree produced from the html
+    # data - the data returned by microtron
+    #
+    # so sanity checks can be made at any of these three levels of abstraction.
+
+    messages = []
+
+#    messages.append( {'line':42, 'kind':'warn', 'msg': "A test warning." } )
+
+    if len(data) == 0:
+        messages.append( {'line':1, 'kind':'error', 'msg': "No hNews data found." } )
+
+    for hnews in data:
+        # missing dates? microtron should handle this one...
+        if ('published' not in hnews) and ('updated' not in hnews):
+            messages.append( {'line':1, # TODO: should be line number of hnews element
+                'kind':'error',
+                'msg': "hNews item has neither 'updated' nor 'published'",
+                # some extra information (use markdown format)
+                'extra': """See the [hAtom spec](http://microformats.org/wiki/hatom#Entry_Updated) for more information""" } )
+
+        # TODO: these checks have been disabled as we can't yet determine
+        # line number for offending elements.
+        # Microtron should probably include (optionally) a reference to
+        # the lxml element that produced each item in the results. We could
+        # get the line number from that.
+
+
+        # sanity-check dates - warn if dates are in the future
+#        for f in ('published','updated'):
+#            if f in hnews:
+#                dt = hnews[f]['datetime']
+#                if dt.tzinfo is None:
+#                    messages.append( {'line':None,
+#                        'kind':'warn',
+#                        'msg': "'%s' has no timezone" %(f,) } )
+
+ #               if dt.replace( tzinfo=None ) > datetime.datetime.utcnow() + datetime.timedelta( days=2 ):
+#                    messages.append( {'line':1,
+#                        'kind':'warn',
+#                        'msg': "'%s' date is in the future" %(f,) } )
+
+
+        # check for concatenated authors in single vcard ("Bob Smith and Fred Bloggs")
+#        if 'author' in hnews:
+#            for a in hnews['author']:
+#                if( " and " in a['fn'] ):
+#                    messages.append( {'line':1,
+#                        'kind':'warn',
+#                        'msg': "Multiple authors in single hcard? '%s'" %(a['fn'],) } )
+
+
+    # TODO: other things we could check for:
+    # - hNews elements inside "entry-content" element?
+    # - other kinds of non-content stuff that finds it's way into "entry-content"
+    #   (eg tags, adverts, "More..." links etc)
+    # - warn about <script> tags inside "entry-content" (not strictly an error, but
+    #   probably not something to encourage...?
+
+    return messages
+
+
+if __name__ == '__main__':
+    sys.exit(main())
+
