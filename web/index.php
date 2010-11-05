@@ -29,7 +29,6 @@ function check( $url )
     $checker_bin = dirname(__FILE__) . "/hnews_checker";
 
     $cmd = "$checker_bin -j -f $url";
-        print "$cmd\n";
     exec( $cmd, &$lines, &$ret );
     $out = implode( "\n", $lines );
 
